@@ -21,4 +21,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "veil"
 include(":app")
- 
+include(":veil")
