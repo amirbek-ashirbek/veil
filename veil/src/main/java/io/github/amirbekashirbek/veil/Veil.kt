@@ -3,6 +3,7 @@ package io.github.amirbekashirbek.veil
 import android.os.Build
 import android.view.WindowManager
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -15,6 +16,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
 import androidx.compose.ui.draw.BlurredEdgeTreatment
 import androidx.compose.ui.draw.blur
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -27,22 +29,45 @@ sealed interface VeilEffect {
     ) : VeilEffect
 }
 
+enum class VeilInteraction {
+    TapToggle,
+    HoldToReveal,
+    LongPressToggle
+}
+
 @Composable
 fun Modifier.veil(
-    effect: VeilEffect = VeilEffect.Blur()
+    effect: VeilEffect = VeilEffect.Blur(),
+    interaction: VeilInteraction = VeilInteraction.TapToggle,
+    enabled: Boolean = true
 ): Modifier = composed {
 
 //    val isRecording by rememberIsScreenRecording()
     var isRevealed by remember { mutableStateOf(false) }
-    val shouldVeil = !isRevealed
+    val shouldVeil = enabled && !isRevealed
 
-    val gestureModifier = Modifier
-        .combinedClickable(
-            onLongClick = { isRevealed = !isRevealed },
+    val gestureModifier = when (interaction) {
+        VeilInteraction.TapToggle -> Modifier.combinedClickable(
             interactionSource = remember { MutableInteractionSource() },
             indication = null,
-            onClick = {}
+            onClick = { isRevealed = !isRevealed },
+            onLongClick = {}
         )
+        VeilInteraction.LongPressToggle -> Modifier.combinedClickable(
+            interactionSource = remember { MutableInteractionSource() },
+            indication = null,
+            onClick = {}, onLongClick = { isRevealed = !isRevealed }
+        )
+        VeilInteraction.HoldToReveal -> Modifier.pointerInput(Unit) {
+            detectTapGestures(
+                onPress = {
+                    isRevealed = true
+                    tryAwaitRelease()
+                    isRevealed = false
+                }
+            )
+        }
+    }
 
     val base = this.then(gestureModifier)
 

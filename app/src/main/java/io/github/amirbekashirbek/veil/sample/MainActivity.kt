@@ -26,6 +26,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import io.github.amirbekashirbek.veil.FlagSecure
 import io.github.amirbekashirbek.veil.VeilEffect
+import io.github.amirbekashirbek.veil.VeilInteraction
 import io.github.amirbekashirbek.veil.sample.ui.theme.VeilTheme
 import io.github.amirbekashirbek.veil.veil
 
@@ -115,7 +116,10 @@ private fun DemoScreen(onFlagSecure: (Boolean) -> Unit) {
             Card(
                 modifier = Modifier
                     .size(250.dp)
-                    .veil(effect = VeilEffect.Blur(8.dp)),
+                    .veil(
+                        effect = VeilEffect.Blur(8.dp),
+                        interaction = VeilInteraction.HoldToReveal
+                    ),
                 shape = RoundedCornerShape(16.dp)
             ) {
                 Column(
