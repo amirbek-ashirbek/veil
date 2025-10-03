@@ -16,6 +16,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
 import androidx.compose.ui.draw.BlurredEdgeTreatment
 import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.Dp
@@ -27,6 +29,25 @@ sealed interface VeilEffect {
         val radius: Dp = 16.dp,
         val edgeTreatment: BlurredEdgeTreatment = BlurredEdgeTreatment.Unbounded
     ) : VeilEffect
+
+    /** Simple color overlay on top of content. */
+    data class Scrim(val color: Color = Color(0x99000000)) : VeilEffect
+
+    /** Darken or lighten by amount (0f..1f). */
+    data class Dim(
+        val amount: Float = 0.6f,
+        val mode: Mode = Mode.Darken
+    ) : VeilEffect {
+        enum class Mode { Darken, Lighten }
+    }
+
+    /** Blur + subtle tint for a frosted-glass look. */
+    data class Frosted(
+        val radius: Dp = 16.dp,
+        val tint: Color = Color.White.copy(alpha = 0.15f),
+        val edgeTreatment: BlurredEdgeTreatment = BlurredEdgeTreatment.Unbounded
+    ) : VeilEffect
+
 }
 
 enum class VeilInteraction {
@@ -56,7 +77,8 @@ fun Modifier.veil(
         VeilInteraction.LongPressToggle -> Modifier.combinedClickable(
             interactionSource = remember { MutableInteractionSource() },
             indication = null,
-            onClick = {}, onLongClick = { isRevealed = !isRevealed }
+            onClick = {},
+            onLongClick = { isRevealed = !isRevealed }
         )
         VeilInteraction.HoldToReveal -> Modifier.pointerInput(Unit) {
             detectTapGestures(
@@ -79,6 +101,24 @@ fun Modifier.veil(
                 radius = effect.radius,
                 edgeTreatment = effect.edgeTreatment
             )
+            is VeilEffect.Scrim -> base.drawWithContent {
+                drawContent()
+                drawRect(effect.color)
+            }
+            is VeilEffect.Dim -> base.drawWithContent {
+                drawContent()
+                val overlayColor = when (effect.mode) {
+                    VeilEffect.Dim.Mode.Darken  -> Color.Black.copy(alpha = effect.amount.coerceIn(0f, 1f))
+                    VeilEffect.Dim.Mode.Lighten -> Color.White.copy(alpha = effect.amount.coerceIn(0f, 1f))
+                }
+                drawRect(overlayColor)
+            }
+            is VeilEffect.Frosted -> base
+                .blur(effect.radius, effect.edgeTreatment)
+                .drawWithContent {
+                    drawContent()
+                    drawRect(effect.tint)
+                }
         }
     }
 }
