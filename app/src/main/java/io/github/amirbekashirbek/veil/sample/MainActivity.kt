@@ -42,6 +42,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.unit.dp
 import io.github.amirbekashirbek.veil.VeilEffect
 import io.github.amirbekashirbek.veil.VeilInteraction
@@ -77,24 +79,17 @@ fun VeilObviousDemoScreen() {
     val defaultDimDarken = 0.75f
     val defaultDimLighten = 0.8f
     val defaultScrimAlpha = 0.5f
-    val defaultFrostedRadius = 18.dp
-    val defaultFrostedTintAlpha = 0.15f
 
     // --- State (rememberSaveable so it survives rotation/process death where possible) ---
     var heavyBlur by remember { mutableStateOf(defaultHeavyBlur.value) } // store as Float
     var dimDarken by remember { mutableStateOf(defaultDimDarken) }
     var dimLighten by remember { mutableStateOf(defaultDimLighten) }
     var scrimAlpha by remember { mutableStateOf(defaultScrimAlpha) }
-    var frostedRadius by remember { mutableStateOf(defaultFrostedRadius.value) }
-    var frostedTintAlpha by remember { mutableStateOf(defaultFrostedTintAlpha) }
 
     var blurInteraction by rememberSaveable { mutableStateOf(VeilInteraction.TapToggle) }
     var dimDarkenInteraction by rememberSaveable { mutableStateOf(VeilInteraction.TapToggle) }
     var dimLightenInteraction by rememberSaveable { mutableStateOf(VeilInteraction.TapToggle) }
     var scrimInteraction by rememberSaveable { mutableStateOf(VeilInteraction.TapToggle) }
-    var desaturateInteraction by rememberSaveable { mutableStateOf(VeilInteraction.TapToggle) }
-    var censorBarsInteraction by rememberSaveable { mutableStateOf(VeilInteraction.TapToggle) }
-    var frostedInteraction by rememberSaveable { mutableStateOf(VeilInteraction.TapToggle) }
 
     Scaffold(
         topBar = { TopAppBar(title = { Text("Veil – Obvious Effects Demo") }) },
@@ -180,32 +175,6 @@ fun VeilObviousDemoScreen() {
                     interaction = scrimInteraction
                 ) { TextWall() }
             }
-
-            // 5) Frosted
-            Section(
-                title = "Frosted (radius = ${frostedRadius.toInt()}dp, tint alpha = ${fmt2(frostedTintAlpha)})",
-                controls = {
-                    DpSlider(
-                        label = "Blur radius",
-                        value = frostedRadius, onValueChange = { frostedRadius = it },
-                        valueRange = 0f..40f
-                    )
-                    FloatSlider(
-                        label = "Tint alpha",
-                        value = frostedTintAlpha, onValueChange = { frostedTintAlpha = it },
-                        valueRange = 0f..0.35f
-                    )
-                }
-            ) {
-                DemoTile(
-                    effect = VeilEffect.Frosted(
-                        radius = frostedRadius.dp,
-                        tint = Color.White.copy(alpha = frostedTintAlpha)
-                    ),
-                    subtitle = "Hold to peek",
-                    interaction = frostedInteraction
-                ) { GradientCanvas() }
-            }
             Spacer(modifier = Modifier.height(64.dp))
         }
     }
@@ -287,6 +256,7 @@ private fun DemoTile(
     interaction: VeilInteraction,
     subtitle: String,
     modifier: Modifier = Modifier,
+    shape: Shape = RectangleShape,
     content: @Composable BoxScope.() -> Unit
 ) {
     Card(
@@ -294,12 +264,12 @@ private fun DemoTile(
             .fillMaxWidth()
             .height(180.dp)
             .veil(effect = effect, interaction = interaction),
-        shape = RoundedCornerShape(16.dp)
+        shape = shape
     ) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .clip(RoundedCornerShape(16.dp)),
+                .clip(shape),
             contentAlignment = Alignment.Center
         ) {
             content()
@@ -364,8 +334,6 @@ private fun PhotoLikeContent() {
                 .padding(16.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Text("Sunset over City", style = MaterialTheme.typography.titleLarge, color = Color.White)
-            Spacer(Modifier.height(8.dp))
             Text("Vibrant colors to show lightening effect", color = Color.White.copy(alpha = 0.85f))
         }
     }

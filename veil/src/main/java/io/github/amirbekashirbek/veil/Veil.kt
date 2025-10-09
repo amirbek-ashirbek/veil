@@ -1,12 +1,17 @@
 package io.github.amirbekashirbek.veil
 
+import android.graphics.Bitmap
+import android.graphics.RuntimeShader
 import android.os.Build
 import android.view.WindowManager
+import androidx.annotation.RequiresApi
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.Stable
 import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -16,13 +21,32 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
 import androidx.compose.ui.draw.BlurredEdgeTreatment
 import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.graphics.RenderEffect
+import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.asComposeRenderEffect
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import androidx.core.view.drawToBitmap
 import java.util.function.Consumer
+import kotlin.math.roundToInt
+import androidx.core.graphics.scale
 
 sealed interface VeilEffect {
     data class Blur(
@@ -41,13 +65,6 @@ sealed interface VeilEffect {
         enum class Mode { Darken, Lighten }
     }
 
-    /** Blur + subtle tint for a frosted-glass look. */
-    data class Frosted(
-        val radius: Dp = 16.dp,
-        val tint: Color = Color.White.copy(alpha = 0.15f),
-        val edgeTreatment: BlurredEdgeTreatment = BlurredEdgeTreatment.Unbounded
-    ) : VeilEffect
-
 }
 
 enum class VeilInteraction {
@@ -63,7 +80,6 @@ fun Modifier.veil(
     enabled: Boolean = true
 ): Modifier = composed {
 
-//    val isRecording by rememberIsScreenRecording()
     var isRevealed by remember { mutableStateOf(false) }
     val shouldVeil = enabled && !isRevealed
 
@@ -97,10 +113,11 @@ fun Modifier.veil(
         base
     } else {
         when (effect) {
-            is VeilEffect.Blur -> base.blur(
-                radius = effect.radius,
-                edgeTreatment = effect.edgeTreatment
-            )
+//            is VeilEffect.Blur -> base.blurCompat(
+//                radius = effect.radius,
+//                edgeTreatment = effect.edgeTreatment
+//            )
+            is VeilEffect.Blur -> base.pixelate()
             is VeilEffect.Scrim -> base.drawWithContent {
                 drawContent()
                 drawRect(effect.color)
@@ -113,12 +130,6 @@ fun Modifier.veil(
                 }
                 drawRect(overlayColor)
             }
-            is VeilEffect.Frosted -> base
-                .blur(effect.radius, effect.edgeTreatment)
-                .drawWithContent {
-                    drawContent()
-                    drawRect(effect.tint)
-                }
         }
     }
 }
@@ -142,4 +153,196 @@ fun rememberIsScreenRecording(): State<Boolean> {
         }
     }
     return isRecording
+}
+
+/**
+ * Backward-compatible blur:
+ * - API 31+: uses Modifier.blur (RenderEffect, GPU)
+ * - API 21–30: snapshots the window region under this composable, fast CPU StackBlur, then draws it
+ *
+ * NOTE: BlurredEdgeTreatment is honored exactly only on API 31+.
+ * On older APIs, apply your own clip(shape) *around* blurCompat if you need rounded edges.
+ */
+@Stable
+fun Modifier.blurCompat(
+    radius: Dp,
+    edgeTreatment: BlurredEdgeTreatment = BlurredEdgeTreatment.Rectangle,
+    downscale: Int = 4 // 4–8 is a huge perf win on old devices
+): Modifier = composed {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        // Native GPU blur
+        return@composed this.blur(radius = radius, edgeTreatment = edgeTreatment)
+    }
+
+    // Pre-31 fallback
+    val view = LocalView.current
+    val density = LocalDensity.current
+    val radiusPx = with(density) { radius.toPx().coerceAtLeast(0.5f) }
+    var winBounds by remember { mutableStateOf(Rect.Zero) }
+
+    this
+        .onGloballyPositioned { coords ->
+            winBounds = coords.boundsInWindow()
+        }
+        .drawWithCache {
+            // guard
+            if (radiusPx <= 0.5f || winBounds.isEmpty) {
+                onDrawWithContent { drawContent() }
+            } else {
+                // 1) Snapshot the whole view (cheap if size small; acceptable for a veil that toggles)
+                val snapshot: Bitmap = try {
+                    // requires: androidx.core:core-ktx (already standard)
+                    view.drawToBitmap(Bitmap.Config.ARGB_8888)
+                } catch (_: Throwable) {
+                    return@drawWithCache onDrawWithContent { drawContent() }
+                }
+
+                // 2) Crop to our window bounds
+                val left   = winBounds.left.roundToInt().coerceIn(0, snapshot.width - 1)
+                val top    = winBounds.top.roundToInt().coerceIn(0, snapshot.height - 1)
+                val right  = winBounds.right.roundToInt().coerceIn(left + 1, snapshot.width)
+                val bottom = winBounds.bottom.roundToInt().coerceIn(top + 1, snapshot.height)
+
+                val cropW = (right - left).coerceAtLeast(1)
+                val cropH = (bottom - top).coerceAtLeast(1)
+
+                val cropped = try {
+                    Bitmap.createBitmap(snapshot, left, top, cropW, cropH)
+                } catch (_: Throwable) {
+                    return@drawWithCache onDrawWithContent { drawContent() }
+                }
+
+                // 3) Downscale -> blur -> (upscale on draw)
+                val rInt = (radiusPx / downscale).roundToInt().coerceAtLeast(1)
+                val blurredBmp = stackBlur(cropped, rInt, downscale)
+
+                val blurredImg = blurredBmp.asImageBitmap()
+                val dstSize = IntSize(size.width.roundToInt(), size.height.roundToInt())
+
+                onDrawWithContent {
+                    drawContent()
+                    // paint the blurred layer over content (veil)
+                    drawImage(
+                        blurredImg,
+                        dstSize = dstSize
+                    )
+                }
+            }
+        }
+}
+
+/**
+ * Very small, fast two-pass StackBlur with downscale.
+ * - Downscales by [downscale], blurs with [radius] in that space, then caller draws upscaled.
+ * - Blurs RGB; sets alpha to 255 (opaque) which is fine for a veil overlay.
+ */
+private fun stackBlur(src: Bitmap, radius: Int, downscale: Int): Bitmap {
+    val w = (src.width / downscale).coerceAtLeast(1)
+    val h = (src.height / downscale).coerceAtLeast(1)
+
+    val small = src.scale(w, h)
+    val inPix = IntArray(w * h)
+    small.getPixels(inPix, 0, w, 0, 0, w, h)
+
+    val win = 2 * radius + 1
+
+    // Horizontal pass
+    val horiz = IntArray(w * h)
+    for (y in 0 until h) {
+        var r = 0; var g = 0; var b = 0
+        // prime window
+        for (x in -radius..radius) {
+            val xx = x.coerceIn(0, w - 1)
+            val c = inPix[y * w + xx]
+            r += (c shr 16) and 0xFF
+            g += (c shr 8) and 0xFF
+            b += c and 0xFF
+        }
+        for (x in 0 until w) {
+            horiz[y * w + x] =
+                (0xFF shl 24) or ((r / win) shl 16) or ((g / win) shl 8) or (b / win)
+            val xOut = (x - radius).coerceIn(0, w - 1)
+            val xIn  = (x + radius + 1).coerceIn(0, w - 1)
+            val cOut = inPix[y * w + xOut]
+            val cIn  = inPix[y * w + xIn]
+            r += ((cIn shr 16) and 0xFF) - ((cOut shr 16) and 0xFF)
+            g += ((cIn shr 8) and 0xFF) - ((cOut shr 8) and 0xFF)
+            b += ( cIn and 0xFF)       - ( cOut and 0xFF)
+        }
+    }
+
+    // Vertical pass
+    val vert = IntArray(w * h)
+    for (x in 0 until w) {
+        var r = 0; var g = 0; var b = 0
+        for (y in -radius..radius) {
+            val yy = y.coerceIn(0, h - 1)
+            val c = horiz[yy * w + x]
+            r += (c shr 16) and 0xFF
+            g += (c shr 8) and 0xFF
+            b += c and 0xFF
+        }
+        for (y in 0 until h) {
+            vert[y * w + x] =
+                (0xFF shl 24) or ((r / win) shl 16) or ((g / win) shl 8) or (b / win)
+            val yOut = (y - radius).coerceIn(0, h - 1)
+            val yIn  = (y + radius + 1).coerceIn(0, h - 1)
+            val cOut = horiz[yOut * w + x]
+            val cIn  = horiz[yIn  * w + x]
+            r += ((cIn shr 16) and 0xFF) - ((cOut shr 16) and 0xFF)
+            g += ((cIn shr 8) and 0xFF) - ((cOut shr 8) and 0xFF)
+            b += ( cIn and 0xFF)       - ( cOut and 0xFF)
+        }
+    }
+
+    return Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply {
+        setPixels(vert, 0, w, 0, 0, w, h)
+    }
+}
+
+fun Modifier.pixelate(
+    pixelSize: Dp = 8.dp,
+    shape: Shape = RectangleShape
+): Modifier = composed {
+
+    val density = LocalDensity.current
+    val px = with(density) { pixelSize.toPx().coerceAtLeast(1f) }
+
+    var sizePx by remember { mutableStateOf(Size.Zero) }
+    var effect by remember { mutableStateOf<RenderEffect?>(null) }
+
+    LaunchedEffect(sizePx, effect) {
+        effect = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            createPixelateEffect(px)
+        } else {
+            null
+        }
+    }
+
+    this
+        .clip(shape)
+        .onSizeChanged { sizePx = Size(it.width.toFloat(), it.height.toFloat()) }
+        .graphicsLayer {
+            renderEffect = effect
+        }
+}
+
+@RequiresApi(Build.VERSION_CODES.TIRAMISU)
+private fun createPixelateEffect(pixelSizePx: Float): RenderEffect {
+    val shaderSrc = """
+        uniform shader content;
+        uniform float2 pixelSize; // (x = blockWidthPx, y = blockHeightPx)
+
+        half4 main(vec2 p) {
+            // Find the center of the grid cell that 'p' belongs to
+            vec2 cell = floor(p / pixelSize) * pixelSize + 0.5 * pixelSize;
+            return content.eval(cell);
+        }
+    """.trimIndent()
+
+    val shader = RuntimeShader(shaderSrc).apply {
+        setFloatUniform("pixelSize", floatArrayOf(pixelSizePx, pixelSizePx))
+    }
+    // "content" here refers to whatever is behind the layer this effect is applied to.
+    return android.graphics.RenderEffect.createRuntimeShaderEffect(shader, "content").asComposeRenderEffect()
 }
