@@ -3,6 +3,7 @@ package io.github.amirbekashirbek.veil
 import android.graphics.Bitmap
 import android.graphics.RuntimeShader
 import android.os.Build
+import android.util.Log
 import android.view.WindowManager
 import androidx.annotation.RequiresApi
 import androidx.compose.foundation.combinedClickable
@@ -47,11 +48,17 @@ import androidx.core.view.drawToBitmap
 import java.util.function.Consumer
 import kotlin.math.roundToInt
 import androidx.core.graphics.scale
+import org.intellij.lang.annotations.Language
 
 sealed interface VeilEffect {
     data class Blur(
         val radius: Dp = 16.dp,
         val edgeTreatment: BlurredEdgeTreatment = BlurredEdgeTreatment.Unbounded
+    ) : VeilEffect
+
+    data class Pixelate(
+        val pixelSize: Dp = 8.dp,
+        val isGrayscale: Boolean = false
     ) : VeilEffect
 
     /** Simple color overlay on top of content. */
@@ -113,11 +120,14 @@ fun Modifier.veil(
         base
     } else {
         when (effect) {
-//            is VeilEffect.Blur -> base.blurCompat(
-//                radius = effect.radius,
-//                edgeTreatment = effect.edgeTreatment
-//            )
-            is VeilEffect.Blur -> base.pixelate()
+            is VeilEffect.Blur -> base.blurCompat(
+                radius = effect.radius,
+                edgeTreatment = effect.edgeTreatment
+            )
+            is VeilEffect.Pixelate -> base.pixelate(
+                pixelSize = effect.pixelSize,
+                isGrayscale = effect.isGrayscale
+            )
             is VeilEffect.Scrim -> base.drawWithContent {
                 drawContent()
                 drawRect(effect.color)
@@ -302,7 +312,8 @@ private fun stackBlur(src: Bitmap, radius: Int, downscale: Int): Bitmap {
 
 fun Modifier.pixelate(
     pixelSize: Dp = 8.dp,
-    shape: Shape = RectangleShape
+    shape: Shape = RectangleShape,
+    isGrayscale: Boolean
 ): Modifier = composed {
 
     val density = LocalDensity.current
@@ -313,7 +324,10 @@ fun Modifier.pixelate(
 
     LaunchedEffect(sizePx, effect) {
         effect = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            createPixelateEffect(px)
+            createPixelateEffect(
+                pixelSizePx = px,
+                isGrayscale = isGrayscale
+            )
         } else {
             null
         }
@@ -328,8 +342,31 @@ fun Modifier.pixelate(
 }
 
 @RequiresApi(Build.VERSION_CODES.TIRAMISU)
-private fun createPixelateEffect(pixelSizePx: Float): RenderEffect {
-    val shaderSrc = """
+private fun createPixelateEffect(
+    pixelSizePx: Float,
+    isGrayscale: Boolean
+): RenderEffect {
+
+    @Language("AGSL")
+    val shaderSrc = if (isGrayscale) {
+        """
+        uniform shader content;
+        uniform float2 pixelSize; // (x = blockWidthPx, y = blockHeightPx)
+
+        half4 main(vec2 p) {
+            // Find the center of the grid cell
+            vec2 cell = floor(p / pixelSize) * pixelSize + 0.5 * pixelSize;
+         half4 color = content.eval(cell);
+
+         // Convert to grayscale using luminance
+         half luminance = dot(color.rgb, half3(0.299, 0.587, 0.114));
+
+            // Return grayscale color (same value for R, G, B)
+         return half4(luminance, luminance, luminance, color.a);
+        }
+    """.trimIndent()
+    } else {
+        """
         uniform shader content;
         uniform float2 pixelSize; // (x = blockWidthPx, y = blockHeightPx)
 
@@ -339,6 +376,7 @@ private fun createPixelateEffect(pixelSizePx: Float): RenderEffect {
             return content.eval(cell);
         }
     """.trimIndent()
+    }
 
     val shader = RuntimeShader(shaderSrc).apply {
         setFloatUniform("pixelSize", floatArrayOf(pixelSizePx, pixelSizePx))

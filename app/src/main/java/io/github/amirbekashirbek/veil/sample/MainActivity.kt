@@ -32,6 +32,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -79,12 +80,14 @@ fun VeilObviousDemoScreen() {
     val defaultDimDarken = 0.75f
     val defaultDimLighten = 0.8f
     val defaultScrimAlpha = 0.5f
+    val defaultPixelSize = 8.dp
 
     // --- State (rememberSaveable so it survives rotation/process death where possible) ---
-    var heavyBlur by remember { mutableStateOf(defaultHeavyBlur.value) } // store as Float
-    var dimDarken by remember { mutableStateOf(defaultDimDarken) }
-    var dimLighten by remember { mutableStateOf(defaultDimLighten) }
-    var scrimAlpha by remember { mutableStateOf(defaultScrimAlpha) }
+    var heavyBlur by remember { mutableFloatStateOf(defaultHeavyBlur.value) } // store as Float
+    var dimDarken by remember { mutableFloatStateOf(defaultDimDarken) }
+    var dimLighten by remember { mutableFloatStateOf(defaultDimLighten) }
+    var scrimAlpha by remember { mutableFloatStateOf(defaultScrimAlpha) }
+    var pixelSize by remember { mutableStateOf(defaultPixelSize) }
 
     var blurInteraction by rememberSaveable { mutableStateOf(VeilInteraction.TapToggle) }
     var dimDarkenInteraction by rememberSaveable { mutableStateOf(VeilInteraction.TapToggle) }
@@ -117,6 +120,26 @@ fun VeilObviousDemoScreen() {
             ) {
                 DemoTile(
                     effect = VeilEffect.Blur(heavyBlur.dp),
+                    subtitle = "Hold to peek",
+                    interaction = blurInteraction
+                ) { GradientCanvas() }
+            }
+
+            Section(
+                title = "Pixelate",
+                controls = {
+                    DpSlider(
+                        label = "Pixel size",
+                        value = pixelSize.value, onValueChange = { pixelSize = it.dp },
+                        valueRange = 0f..40f
+                    )
+                }
+            ) {
+                DemoTile(
+                    effect = VeilEffect.Pixelate(
+                        pixelSize = pixelSize,
+                        isGrayscale = true
+                    ),
                     subtitle = "Hold to peek",
                     interaction = blurInteraction
                 ) { GradientCanvas() }
