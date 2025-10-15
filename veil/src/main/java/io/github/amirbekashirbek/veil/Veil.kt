@@ -3,7 +3,6 @@ package io.github.amirbekashirbek.veil
 import android.graphics.Bitmap
 import android.graphics.RuntimeShader
 import android.os.Build
-import android.util.Log
 import android.view.WindowManager
 import androidx.annotation.RequiresApi
 import androidx.compose.foundation.combinedClickable
@@ -11,7 +10,6 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
@@ -22,11 +20,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
 import androidx.compose.ui.draw.BlurredEdgeTreatment
 import androidx.compose.ui.draw.blur
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Rect
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.RenderEffect
@@ -44,11 +40,11 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import androidx.core.graphics.scale
 import androidx.core.view.drawToBitmap
+import org.intellij.lang.annotations.Language
 import java.util.function.Consumer
 import kotlin.math.roundToInt
-import androidx.core.graphics.scale
-import org.intellij.lang.annotations.Language
 
 sealed interface VeilEffect {
     data class Blur(
@@ -317,62 +313,69 @@ fun Modifier.pixelate(
 ): Modifier = composed {
 
     val density = LocalDensity.current
-    val px = with(density) { pixelSize.toPx().coerceAtLeast(1f) }
+    val pixelSizePx = with(density) { pixelSize.toPx().coerceAtLeast(1f) }
 
-    var sizePx by remember { mutableStateOf(Size.Zero) }
-    var effect by remember { mutableStateOf<RenderEffect?>(null) }
+    // Track the actual layer size in px so we can feed it to the shader & crop
+    var sizePx by remember { mutableStateOf(IntSize.Zero) }
 
-    LaunchedEffect(sizePx, effect) {
-        effect = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+    val renderEffect = remember(pixelSizePx, isGrayscale) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && sizePx != IntSize.Zero)
             createPixelateEffect(
-                pixelSizePx = px,
-                isGrayscale = isGrayscale
+                pixelSizePx = pixelSizePx,
+                isGrayscale = isGrayscale,
+                widthPx = sizePx.width,
+                heightPx = sizePx.height
             )
-        } else {
+        else
             null
-        }
     }
 
     this
-        .clip(shape)
-        .onSizeChanged { sizePx = Size(it.width.toFloat(), it.height.toFloat()) }
+        .onSizeChanged { sizePx = it }
         .graphicsLayer {
-            renderEffect = effect
+            this.renderEffect = renderEffect
+            this.shape = shape
+            clip = true
         }
 }
 
 @RequiresApi(Build.VERSION_CODES.TIRAMISU)
 private fun createPixelateEffect(
     pixelSizePx: Float,
-    isGrayscale: Boolean
+    isGrayscale: Boolean,
+    widthPx: Int,
+    heightPx: Int
 ): RenderEffect {
 
     @Language("AGSL")
     val shaderSrc = if (isGrayscale) {
         """
         uniform shader content;
-        uniform float2 pixelSize; // (x = blockWidthPx, y = blockHeightPx)
+        uniform float2 pixelSize;
+        uniform float2 contentSize;
 
         half4 main(vec2 p) {
-            // Find the center of the grid cell
-            vec2 cell = floor(p / pixelSize) * pixelSize + 0.5 * pixelSize;
-         half4 color = content.eval(cell);
+            vec2 halfPx = 0.5 * pixelSize;
+            vec2 cell = floor(p / pixelSize) * pixelSize + halfPx;
 
-         // Convert to grayscale using luminance
-         half luminance = dot(color.rgb, half3(0.299, 0.587, 0.114));
+            // keep the sample point INSIDE the content
+            cell = clamp(cell, halfPx, contentSize - halfPx);
 
-            // Return grayscale color (same value for R, G, B)
-         return half4(luminance, luminance, luminance, color.a);
+            half4 color = content.eval(cell);
+            half lum = dot(color.rgb, half3(0.299, 0.587, 0.114));
+            return half4(lum, lum, lum, color.a);
         }
     """.trimIndent()
     } else {
         """
         uniform shader content;
-        uniform float2 pixelSize; // (x = blockWidthPx, y = blockHeightPx)
+        uniform float2 pixelSize;
+        uniform float2 contentSize;
 
         half4 main(vec2 p) {
-            // Find the center of the grid cell that 'p' belongs to
-            vec2 cell = floor(p / pixelSize) * pixelSize + 0.5 * pixelSize;
+            vec2 halfPx = 0.5 * pixelSize;
+            vec2 cell = floor(p / pixelSize) * pixelSize + halfPx;
+            cell = clamp(cell, halfPx, contentSize - halfPx);
             return content.eval(cell);
         }
     """.trimIndent()
@@ -380,7 +383,11 @@ private fun createPixelateEffect(
 
     val shader = RuntimeShader(shaderSrc).apply {
         setFloatUniform("pixelSize", floatArrayOf(pixelSizePx, pixelSizePx))
+        setFloatUniform("contentSize", floatArrayOf(widthPx.toFloat(), heightPx.toFloat()))
     }
+
     // "content" here refers to whatever is behind the layer this effect is applied to.
-    return android.graphics.RenderEffect.createRuntimeShaderEffect(shader, "content").asComposeRenderEffect()
+    return android.graphics.RenderEffect
+        .createRuntimeShaderEffect(shader, "content")
+        .asComposeRenderEffect()
 }
