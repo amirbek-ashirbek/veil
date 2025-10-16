@@ -107,9 +107,9 @@ fun VeilObviousDemoScreen() {
             verticalArrangement = Arrangement.spacedBy(22.dp)
         ) {
 
-            // 1) Heavy Blur
+            // 1) Blur
             Section(
-                title = "Heavy Blur (${heavyBlur.toInt()}dp) over gradient",
+                title = "Blur (${heavyBlur.toInt()}dp) over gradient",
                 controls = {
                     DpSlider(
                         label = "Blur radius",
@@ -122,7 +122,17 @@ fun VeilObviousDemoScreen() {
                     effect = VeilEffect.Blur(heavyBlur.dp),
                     subtitle = "Hold to peek",
                     interaction = blurInteraction
-                ) { GradientCanvas() }
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(color = Color.Gray)
+                    ) {
+                        Text(
+                            text = "Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello"
+                        )
+                    }
+                }
             }
 
             Section(
