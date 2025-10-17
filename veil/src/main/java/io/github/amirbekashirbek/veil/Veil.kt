@@ -22,6 +22,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
 import androidx.compose.ui.draw.BlurredEdgeTreatment
 import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
@@ -41,6 +42,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.core.graphics.scale
@@ -124,7 +126,7 @@ fun Modifier.veil(
         when (effect) {
             is VeilEffect.Blur -> base.blurCompat(
                 radius = effect.radius,
-                edgeTreatment = effect.edgeTreatment
+//                edgeTreatment = effect.edgeTreatment
             )
             is VeilEffect.Pixelate -> base.pixelate(
                 pixelSize = effect.pixelSize,
@@ -178,63 +180,68 @@ fun rememberIsScreenRecording(): State<Boolean> {
 fun Modifier.blurCompat(
     radius: Dp,
     edgeTreatment: BlurredEdgeTreatment = BlurredEdgeTreatment.Rectangle,
-    downscale: Int = 4 // 4–8 is a huge perf win on old devices
+    downscale: Int = 4,
+    refreshKey: Any? = null   // bump when underlying content actually changes
 ): Modifier = composed {
-
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-        // Native GPU blur
         return@composed this.blur(radius = radius, edgeTreatment = edgeTreatment)
     }
 
-    // Pre-31 fallback
+    // --- Pre-31 fallback path ---
     val view = LocalView.current
     val density = LocalDensity.current
     val radiusPx = with(density) { radius.toPx().coerceAtLeast(0.5f) }
-    var windowBounds by remember { mutableStateOf(Rect.Zero) }
 
+    // Track window rect separately from size; only size changes should trigger capture.
+    var winRect by remember { mutableStateOf(IntRect(0, 0, 0, 0)) }
+    var sizePx by remember { mutableStateOf(IntSize.Zero) }
+
+    // Capture state
+    var isCapturing by remember { mutableStateOf(false) }
+
+    // Baseline crop + blurred output
     var baseCrop by remember { mutableStateOf<Bitmap?>(null) }
     var blurred by remember { mutableStateOf<ImageBitmap?>(null) }
-    var blurredWindowRect by remember { mutableStateOf<IntRect?>(null) }
 
-    LaunchedEffect(windowBounds) {
-
-        if (windowBounds.isEmpty) {
-            baseCrop?.recycle()
-            baseCrop = null
+    // 1) Capture a CLEAN BASELINE only when SIZE or refreshKey changes
+    LaunchedEffect(sizePx, refreshKey) {
+        if (sizePx.width <= 0 || sizePx.height <= 0) {
+            baseCrop?.recycle(); baseCrop = null
             return@LaunchedEffect
         }
-        withFrameNanos {  }
+
+        isCapturing = true
+        // wait one frame to separate our hide/draw from the capture
+        withFrameNanos { /* sync */ }
 
         val snapshot = try {
             view.drawToBitmap(Bitmap.Config.ARGB_8888)
-        } catch (_: Exception) {
+        } catch (_: Throwable) {
+            isCapturing = false
             return@LaunchedEffect
         }
 
-        val left = windowBounds.left.roundToInt().coerceIn(0, snapshot.width - 1)
-        val top = windowBounds.top.roundToInt().coerceIn(0, snapshot.height - 1)
-        val right = windowBounds.right.roundToInt().coerceIn(left + 1, snapshot.width)
-        val bottom = windowBounds.bottom.roundToInt().coerceIn(top + 1, snapshot.height)
+        val left = winRect.left.coerceIn(0, snapshot.width - 1)
+        val top = winRect.top.coerceIn(0, snapshot.height - 1)
+        val w = sizePx.width.coerceAtLeast(1).coerceAtMost(snapshot.width - left)
+        val h = sizePx.height.coerceAtLeast(1).coerceAtMost(snapshot.height - top)
 
-        blurredWindowRect = IntRect(left, top, right, bottom)
-
-        val cropW = (right - left).coerceAtLeast(1)
-        val cropH = (bottom - top).coerceAtLeast(1)
-
-        val cropped = try {
-            Bitmap.createBitmap(snapshot, left, top, cropW, cropH)
-        } catch (_: Exception) {
+        val crop = try {
+            Bitmap.createBitmap(snapshot, left, top, w, h)
+        } catch (_: Throwable) {
             snapshot.recycle()
-            blurred = null
+            isCapturing = false
             return@LaunchedEffect
         } finally {
             snapshot.recycle()
         }
 
         baseCrop?.recycle()
-        baseCrop = cropped
+        baseCrop = crop
+        isCapturing = false
     }
 
+    // 2) Blur stage uses the baseline; slider scrubbing does NOT re-capture
     LaunchedEffect(baseCrop, radiusPx, downscale) {
         val src = baseCrop
         if (src == null || radiusPx <= 0.5f) {
@@ -242,38 +249,49 @@ fun Modifier.blurCompat(
             return@LaunchedEffect
         }
         val rInt = (radiusPx / downscale).roundToInt().coerceAtLeast(1)
-        val bmp = withContext(Dispatchers.Default) {
-            stackBlur(src, rInt, downscale)
-        }
+        val bmp = withContext(Dispatchers.Default) { stackBlur(src, rInt, downscale) }
         blurred = bmp.asImageBitmap()
+        // do not recycle bmp after asImageBitmap(); it shares backing memory
+    }
+
+    // Cleanup
+    DisposableEffect(Unit) {
+        onDispose {
+            baseCrop?.recycle()
+            baseCrop = null
+        }
     }
 
     this
-        .onGloballyPositioned { coordinates ->
-            windowBounds = coordinates.boundsInWindow()
+        .onGloballyPositioned { coords ->
+            val b: Rect = coords.boundsInWindow()
+            val newRect = IntRect(
+                b.left.roundToInt(), b.top.roundToInt(),
+                b.right.roundToInt(), b.bottom.roundToInt()
+            )
+            if (newRect != winRect) {
+                winRect = newRect
+                val newSize = IntSize(
+                    width = newRect.right - newRect.left,
+                    height = newRect.bottom - newRect.top
+                )
+                if (newSize != sizePx) sizePx = newSize
+            }
         }
         .drawWithContent {
             drawContent()
-            val img = blurred ?: return@drawWithContent
-            val sourceRect = blurredWindowRect ?: return@drawWithContent
-            val currentWin = windowBounds
-
-            val destinationOffset = IntOffset(
-                x = (sourceRect.left - currentWin.left).roundToInt(),
-                y = (sourceRect.top - currentWin.top ).roundToInt()
-            )
-            val destinationSize = IntSize(
-                width = sourceRect.right - sourceRect.left,
-                height = sourceRect.bottom - sourceRect.top
-            )
-
-            drawImage(
-                image = img,
-                dstSize = destinationSize,
-                dstOffset = destinationOffset
-            )
+            // During capture we previously hid the overlay to avoid self-capture.
+            // Now capture is only on SIZE/refreshKey → not during scroll → no flashes.
+            blurred?.let { img ->
+                drawImage(
+                    image = img,
+                    dstSize = IntSize(size.width.roundToInt(), size.height.roundToInt())
+                )
+            }
         }
 }
+
+
 /**
  * Very small, fast two-pass StackBlur with downscale.
  * - Downscales by [downscale], blurs with [radius] in that space, then caller draws upscaled.
