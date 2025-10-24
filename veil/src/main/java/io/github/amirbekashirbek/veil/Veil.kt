@@ -11,21 +11,18 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.Stable
 import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
 import androidx.compose.ui.draw.BlurredEdgeTreatment
 import androidx.compose.ui.draw.blur
-import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.draw.drawWithContent
-import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.RenderEffect
@@ -45,14 +42,14 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import androidx.core.graphics.createBitmap
 import androidx.core.graphics.scale
 import androidx.core.view.drawToBitmap
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.intellij.lang.annotations.Language
 import java.util.function.Consumer
 import kotlin.math.roundToInt
-import androidx.core.graphics.createBitmap
-import kotlinx.coroutines.Dispatchers
 
 sealed interface VeilEffect {
     data class Blur(
@@ -181,7 +178,7 @@ fun Modifier.blurCompat(
     radius: Dp,
     edgeTreatment: BlurredEdgeTreatment = BlurredEdgeTreatment.Rectangle,
     downscale: Int = 4,
-    refreshKey: Any? = null   // bump when underlying content actually changes
+    refreshKey: Any? = null,   // bump when underlying content actually changes,
 ): Modifier = composed {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
         return@composed this.blur(radius = radius, edgeTreatment = edgeTreatment)
@@ -196,8 +193,7 @@ fun Modifier.blurCompat(
     var winRect by remember { mutableStateOf(IntRect(0, 0, 0, 0)) }
     var sizePx by remember { mutableStateOf(IntSize.Zero) }
 
-    // Capture state
-    var isCapturing by remember { mutableStateOf(false) }
+    var cropOffsetInLocal by remember { mutableStateOf(IntOffset.Zero) }
 
     // Baseline crop + blurred output
     var baseCrop by remember { mutableStateOf<Bitmap?>(null) }
@@ -210,35 +206,47 @@ fun Modifier.blurCompat(
             return@LaunchedEffect
         }
 
-        isCapturing = true
-        // wait one frame to separate our hide/draw from the capture
-        withFrameNanos { /* sync */ }
 
         val snapshot = try {
             view.drawToBitmap(Bitmap.Config.ARGB_8888)
         } catch (_: Throwable) {
-            isCapturing = false
             return@LaunchedEffect
         }
 
-        val left = winRect.left.coerceIn(0, snapshot.width - 1)
-        val top = winRect.top.coerceIn(0, snapshot.height - 1)
-        val w = sizePx.width.coerceAtLeast(1).coerceAtMost(snapshot.width - left)
-        val h = sizePx.height.coerceAtLeast(1).coerceAtMost(snapshot.height - top)
+        val loc = IntArray(2).also { view.getLocationInWindow(it) }
+
+        val compLeft = winRect.left - loc[0]
+        val compTop  = winRect.top  - loc[1]
+
+        // Intersect our composable rect with the snapshot bounds
+        val srcLeft   = compLeft.coerceAtLeast(0)
+        val srcTop    = compTop.coerceAtLeast(0)
+        val srcRight  = (compLeft + sizePx.width).coerceAtMost(snapshot.width)
+        val srcBottom = (compTop + sizePx.height).coerceAtMost(snapshot.height)
+
+        val srcW = (srcRight - srcLeft).coerceAtLeast(0)
+        val srcH = (srcBottom - srcTop).coerceAtLeast(0)
+
+        if (srcW == 0 || srcH == 0) {
+            snapshot.recycle()
+            return@LaunchedEffect
+        }
+
+        // Where to place this visible crop inside our composable
+        val localOffsetX = (srcLeft - compLeft).coerceAtLeast(0)
+        val localOffsetY = (srcTop  - compTop ).coerceAtLeast(0)
+        cropOffsetInLocal = IntOffset(localOffsetX, localOffsetY)
 
         val crop = try {
-            Bitmap.createBitmap(snapshot, left, top, w, h)
+            Bitmap.createBitmap(snapshot, srcLeft, srcTop, srcW, srcH)
         } catch (_: Throwable) {
             snapshot.recycle()
-            isCapturing = false
             return@LaunchedEffect
         } finally {
             snapshot.recycle()
         }
-
         baseCrop?.recycle()
         baseCrop = crop
-        isCapturing = false
     }
 
     // 2) Blur stage uses the baseline; slider scrubbing does NOT re-capture
@@ -248,10 +256,13 @@ fun Modifier.blurCompat(
             blurred = null
             return@LaunchedEffect
         }
-        val rInt = (radiusPx / downscale).roundToInt().coerceAtLeast(1)
-        val bmp = withContext(Dispatchers.Default) { stackBlur(src, rInt, downscale) }
+        val safeDownscale = downscale.coerceAtLeast(1)
+        val rInt = (radiusPx / safeDownscale).roundToInt().coerceAtLeast(1)
+        val safeSrc = src.copy(Bitmap.Config.ARGB_8888, false)
+        val bmp = withContext(Dispatchers.Default) { stackBlur(safeSrc, rInt, safeDownscale) }
+        // Optionally recycle the copy to keep memory in check
+        safeSrc.recycle()
         blurred = bmp.asImageBitmap()
-        // do not recycle bmp after asImageBitmap(); it shares backing memory
     }
 
     // Cleanup
@@ -259,34 +270,42 @@ fun Modifier.blurCompat(
         onDispose {
             baseCrop?.recycle()
             baseCrop = null
+            blurred = null
         }
     }
 
     this
-        .onGloballyPositioned { coords ->
-            val b: Rect = coords.boundsInWindow()
+        .onGloballyPositioned { coordinates ->
+            // Stable layout size (does NOT shrink when partially offscreen)
+            sizePx = coordinates.size
+
+            // Track position in window separately
+            val b = coordinates.boundsInWindow()
             val newRect = IntRect(
                 b.left.roundToInt(), b.top.roundToInt(),
                 b.right.roundToInt(), b.bottom.roundToInt()
             )
-            if (newRect != winRect) {
-                winRect = newRect
-                val newSize = IntSize(
-                    width = newRect.right - newRect.left,
-                    height = newRect.bottom - newRect.top
-                )
-                if (newSize != sizePx) sizePx = newSize
-            }
+            if (newRect != winRect) winRect = newRect
         }
         .drawWithContent {
             drawContent()
-            // During capture we previously hid the overlay to avoid self-capture.
-            // Now capture is only on SIZE/refreshKey → not during scroll → no flashes.
+
+            // Draw last known blur even while capturing => no flicker
             blurred?.let { img ->
-                drawImage(
-                    image = img,
-                    dstSize = IntSize(size.width.roundToInt(), size.height.roundToInt())
-                )
+                // img is downscaled; map it back to the visible area size
+                val visibleW = baseCrop?.width ?: 0
+                val visibleH = baseCrop?.height ?: 0
+                if (visibleW > 0 && visibleH > 0) {
+                    drawImage(
+                        image = img,
+                        // Scale from downscaled to visible area size
+                        srcSize = IntSize(img.width, img.height),
+                        dstSize = IntSize(visibleW, visibleH),
+                        // Place the visible crop at the right offset inside our composable
+                        dstOffset = cropOffsetInLocal,
+                        filterQuality = FilterQuality.Medium
+                    )
+                }
             }
         }
 }
